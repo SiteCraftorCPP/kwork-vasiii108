@@ -68,8 +68,8 @@ async def start_handler(message: Message, settings: Settings, app_storage: Stora
         "/link_bio ссылка-на-таблицу-биографии\n"
         "/link_money ссылка-на-таблицу-денег\n"
         "/report или кнопка «Ежедневный отчёт» - отчёт по таблицам\n"
-        "/model - модель Haiku / Sonnet 4.5.\n"
-        "/prompts - промпты отчётов и разбора голоса.",
+        "/model - модель Haiku / Sonnet 4.5\n"
+        "/prompts - промпты отчётов и разбора голоса",
         reply_markup=settings_menu_keyboard(),
     )
 
