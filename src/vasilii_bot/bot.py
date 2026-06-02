@@ -66,11 +66,10 @@ async def start_handler(message: Message, settings: Settings, app_storage: Stora
         "Подключение таблиц:\n"
         "/create_sheets your@gmail.com - создать личные копии шаблонов\n"
         "/link_bio ссылка-на-таблицу-биографии\n"
-        "/link_money ссылка-на-таблицу-денег\n\n"
-        "После голосового сообщения я покажу распределение и дождусь подтверждения.\n"
-        "/report или кнопка «Ежедневный отчёт» — отчёт по таблицам.\n"
-        "/model — модель Haiku / Sonnet 4.5.\n"
-        "/prompts — промпты отчётов (отдельно) и разбора голоса.",
+        "/link_money ссылка-на-таблицу-денег\n"
+        "/report или кнопка «Ежедневный отчёт» - отчёт по таблицам\n"
+        "/model - модель Haiku / Sonnet 4.5.\n"
+        "/prompts - промпты отчётов и разбора голоса.",
         reply_markup=settings_menu_keyboard(),
     )
 
@@ -737,18 +736,16 @@ def _looks_like_email(value: str) -> bool:
 
 async def _answer_prompts_menu(message: Message) -> None:
     await message.answer(
-        "Промпты разделены:\n"
-        "• отчёты — шаблоны дня, недели, месяца и системный;\n"
-        "• разбор голоса — отдельный промпт для био и денег.",
+        "Отчёты - шаблоны дня, недели, месяца и системный.\n"
+        "Разбор голоса - отдельный промпт для био и денег.",
         reply_markup=prompts_hub_keyboard(),
     )
 
 
 async def _edit_prompts_hub(message: Message) -> None:
     await message.edit_text(
-        "Промпты разделены:\n"
-        "• отчёты — шаблоны дня, недели, месяца и системный;\n"
-        "• разбор голоса — отдельный промпт для био и денег.",
+        "Отчёты - шаблоны дня, недели, месяца и системный.\n"
+        "Разбор голоса - отдельный промпт для био и денег.",
         reply_markup=prompts_hub_keyboard(),
     )
 
