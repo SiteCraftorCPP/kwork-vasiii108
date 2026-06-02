@@ -1,6 +1,8 @@
 from datetime import date
+from unittest.mock import MagicMock
 
 from vasilii_bot.models import FinanceDirection, VoiceAnalysis
+from vasilii_bot.services.sheets import GoogleSheetsService
 from vasilii_bot.services.sheets import (
     GoogleSheetsService,
     _append_bio_rich_text,
@@ -153,6 +155,22 @@ def test_detect_money_layout_when_expenses_are_left() -> None:
     assert income.category_col == 11
 
 
+def test_pick_template_worksheet_prefers_named_sheet_over_filled_month() -> None:
+    class StubWorksheet:
+        def __init__(self, title: str, sheet_id: int):
+            self.title = title
+            self.id = sheet_id
+
+    worksheets = [
+        StubWorksheet("05.2026", 1),
+        StubWorksheet("Шаблон", 2),
+        StubWorksheet("01.2026", 3),
+    ]
+    picked = _pick_template_worksheet(worksheets, "month")
+    assert picked is not None
+    assert picked.title == "Шаблон"
+
+
 def test_pick_template_worksheet_prefers_earliest_month_sheet() -> None:
     class StubWorksheet:
         def __init__(self, title: str, sheet_id: int):
@@ -167,6 +185,42 @@ def test_pick_template_worksheet_prefers_earliest_month_sheet() -> None:
     picked = _pick_template_worksheet(worksheets, "month")
     assert picked is not None
     assert picked.title == "01.2026"
+
+
+def test_copy_sheet_from_template_uses_copy_to_api() -> None:
+    service = GoogleSheetsService.__new__(GoogleSheetsService)
+    api = MagicMock()
+    sheets_api = MagicMock()
+    copy_response = MagicMock()
+    copy_response.execute.return_value = {"sheetId": 42}
+    sheets_api.copyTo.return_value = copy_response
+    api.spreadsheets.return_value.sheets.return_value = sheets_api
+    batch_response = MagicMock()
+    batch_response.execute.return_value = {}
+    api.spreadsheets.return_value.batchUpdate.return_value = batch_response
+    service.api = api
+
+    destination = MagicMock()
+    destination.id = "dest-spreadsheet"
+    worksheet = MagicMock()
+    worksheet.title = "06.2026"
+    destination.worksheet.return_value = worksheet
+
+    result = service._copy_sheet_from_template_spreadsheet(
+        template_spreadsheet_id="template-spreadsheet",
+        destination=destination,
+        source_sheet_id=7,
+        new_title="06.2026",
+    )
+
+    sheets_api.copyTo.assert_called_once_with(
+        spreadsheetId="template-spreadsheet",
+        sheetId=7,
+        body={"destinationSpreadsheetId": "dest-spreadsheet"},
+    )
+    rename_request = api.spreadsheets.return_value.batchUpdate.call_args.kwargs["body"]["requests"][0]
+    assert rename_request["updateSheetProperties"]["properties"]["title"] == "06.2026"
+    assert result is worksheet
 
 
 def test_detect_money_layout_when_income_is_left() -> None:

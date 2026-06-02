@@ -8,9 +8,15 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from ..config import Settings
+from .bio_facts import apply_life_facts_from_raw_text
 from ..models import BioField, FinanceCategorySet, VoiceAnalysis
 from ..utils.dates import MONTH_ALIASES
-from .prompts import load_prompt, render_report_prompt
+from .prompts import (
+    load_prompt,
+    render_report_prompt,
+    report_system_prompt,
+    voice_system_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +45,6 @@ class LLMService(Protocol):
         pass
 
 
-def voice_system_prompt() -> str:
-    return load_prompt("voice_analysis.txt")
-
-
 class AnthropicLLM:
     def __init__(self, settings: Settings):
         if not settings.anthropic_api_key:
@@ -57,7 +59,7 @@ class AnthropicLLM:
         current_date: date,
     ) -> VoiceAnalysis:
         prompt = self._build_analysis_prompt(transcript, categories, current_date)
-        content = await self._complete(prompt, max_tokens=1800)
+        content = await self._complete_voice(prompt, max_tokens=1800)
         payload = _extract_json(content)
         if not payload.get("entry_date"):
             payload["entry_date"] = current_date.isoformat()
@@ -72,15 +74,21 @@ class AnthropicLLM:
     async def summarize(self, title: str, source_text: str, period: str = "weekly") -> str:
         prompt = render_report_prompt(period, title, source_text)
         max_tokens = 900 if period == "daily" else 1200
-        return await self._complete(prompt, max_tokens=max_tokens)
+        return await self._complete_report(prompt, max_tokens=max_tokens)
 
-    async def _complete(self, prompt: str, max_tokens: int) -> str:
+    async def _complete_voice(self, prompt: str, max_tokens: int) -> str:
+        return await self._complete(prompt, max_tokens=max_tokens, system=voice_system_prompt())
+
+    async def _complete_report(self, prompt: str, max_tokens: int) -> str:
+        return await self._complete(prompt, max_tokens=max_tokens, system=report_system_prompt())
+
+    async def _complete(self, prompt: str, max_tokens: int, *, system: str) -> str:
         try:
             message = await self.client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
                 temperature=0,
-                system=voice_system_prompt(),
+                system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
         except Exception as exc:  # noqa: BLE001
@@ -132,7 +140,7 @@ class OpenAICompatibleLLM:
         current_date: date,
     ) -> VoiceAnalysis:
         prompt = AnthropicLLM._build_analysis_prompt(transcript, categories, current_date)
-        content = await self._complete(prompt, max_tokens=1800)
+        content = await self._complete_voice(prompt, max_tokens=1800)
         payload = _extract_json(content)
         if not payload.get("entry_date"):
             payload["entry_date"] = current_date.isoformat()
@@ -147,14 +155,20 @@ class OpenAICompatibleLLM:
     async def summarize(self, title: str, source_text: str, period: str = "weekly") -> str:
         prompt = render_report_prompt(period, title, source_text)
         max_tokens = 900 if period == "daily" else 1200
-        return await self._complete(prompt, max_tokens=max_tokens)
+        return await self._complete_report(prompt, max_tokens=max_tokens)
 
-    async def _complete(self, prompt: str, max_tokens: int) -> str:
+    async def _complete_voice(self, prompt: str, max_tokens: int) -> str:
+        return await self._complete(prompt, max_tokens=max_tokens, system=voice_system_prompt())
+
+    async def _complete_report(self, prompt: str, max_tokens: int) -> str:
+        return await self._complete(prompt, max_tokens=max_tokens, system=report_system_prompt())
+
+    async def _complete(self, prompt: str, max_tokens: int, *, system: str) -> str:
         try:
             completion = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": voice_system_prompt()},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=max_tokens,
@@ -171,8 +185,10 @@ class OpenAICompatibleLLM:
 
 
 def create_llm_service(settings: Settings, model: str | None = None) -> LLMService:
+    from ..llm_models import normalize_model_id
+
     provider = settings.llm_provider
-    resolved_model = model or settings.llm_model
+    resolved_model = normalize_model_id(model or settings.llm_model)
     if provider == "anthropic":
         return AnthropicLLM(settings)
 
@@ -265,7 +281,10 @@ def _prepare_voice_payload(
 
         clean_bio[field.value] = _dedupe([item for item in clean_items if item])
 
-    repaired["bio"] = _enrich_bio_money_items(clean_bio, finance)
+    enriched_bio = _enrich_bio_money_items(clean_bio, finance)
+    raw_text = str(repaired.get("raw_text") or "")
+    enriched_bio, finance = apply_life_facts_from_raw_text(enriched_bio, finance, raw_text)
+    repaired["bio"] = enriched_bio
     repaired["finance"] = finance
     repaired["transfers"] = _normalize_transfers(repaired.get("transfers"))
     return repaired

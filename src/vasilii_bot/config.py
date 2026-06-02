@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .llm_models import normalize_model_id
+
 LLMProvider = Literal["anthropic", "mashagpt", "bothub", "proxyapi", "openai", "custom"]
 TranscriptionProvider = Literal["mashagpt", "bothub", "proxyapi", "openai", "custom"]
 
@@ -68,6 +70,11 @@ class Settings(BaseSettings):
         if value < 0 or value > 23:
             raise ValueError("REPORT_HOUR must be between 0 and 23")
         return value
+
+    @field_validator("llm_model")
+    @classmethod
+    def normalize_llm_model(cls, value: str) -> str:
+        return normalize_model_id(value)
 
     @field_validator("report_minute")
     @classmethod

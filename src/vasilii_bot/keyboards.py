@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .llm_models import MODEL_CHOICES, choice_for_model_id, model_id_for_choice
-from .services.prompts import PROMPT_CATALOG
+from .services.prompts import REPORT_PROMPT_CATALOG
 
 
 def confirmation_keyboard(
@@ -18,7 +18,7 @@ def confirmation_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text="Возрастела",
+                    text="Возраст тела",
                     callback_data=f"confirm_bio:{pending_id}",
                 ),
                 InlineKeyboardButton(
@@ -31,7 +31,7 @@ def confirmation_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text="✅ Возрастела",
+                    text="✅ Возраст тела",
                     callback_data=f"confirm_bio:{pending_id}",
                 )
             ]
@@ -73,6 +73,12 @@ def settings_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(
+                    text="📊 Ежедневный отчёт",
+                    callback_data="report_daily",
+                ),
+            ],
+            [
                 InlineKeyboardButton(text="📝 Промпты", callback_data="prompts_menu"),
                 InlineKeyboardButton(text="🤖 Модель", callback_data="model_menu"),
             ],
@@ -80,17 +86,47 @@ def settings_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def prompts_menu_keyboard() -> InlineKeyboardMarkup:
+def prompts_hub_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📊 Промпты отчётов",
+                    callback_data="report_prompts_menu",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎙 Промпт разбора голоса",
+                    callback_data="prompt_edit:voice_analysis",
+                ),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings_menu")],
+        ]
+    )
+
+
+def report_prompts_menu_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for key, (_filename, label) in PROMPT_CATALOG.items():
+    for key, (_filename, label) in REPORT_PROMPT_CATALOG.items():
         rows.append(
             [InlineKeyboardButton(text=label, callback_data=f"prompt_edit:{key}")]
         )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings_menu")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="prompts_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def prompts_menu_keyboard() -> InlineKeyboardMarkup:
+    """Alias for the prompts hub (reports vs voice)."""
+    return prompts_hub_keyboard()
+
+
 def prompt_edit_keyboard(prompt_key: str) -> InlineKeyboardMarkup:
+    back_target = (
+        "report_prompts_menu"
+        if prompt_key in REPORT_PROMPT_CATALOG
+        else "prompts_menu"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -100,7 +136,7 @@ def prompt_edit_keyboard(prompt_key: str) -> InlineKeyboardMarkup:
                 ),
             ],
             [
-                InlineKeyboardButton(text="⬅️ К промптам", callback_data="prompts_menu"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data=back_target),
                 InlineKeyboardButton(text="✖️ Отмена", callback_data="prompt_cancel"),
             ],
         ]

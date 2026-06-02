@@ -5,6 +5,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+from vasilii_bot.utils.text import sanitize_money_description
+
 
 class FinanceDirection(StrEnum):
     income = "income"
@@ -68,15 +70,22 @@ class FinanceEntry(BaseModel):
     description: str = Field(min_length=1)
     day: int | None = Field(default=None, ge=1, le=31)
 
-    @field_validator("description", "category")
+    @field_validator("category")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip(" .\n\t")
+
+    @field_validator("description")
+    @classmethod
+    def strip_description(cls, value: str) -> str:
+        cleaned = value.strip(" .\n\t")
+        return sanitize_money_description(cleaned)
 
 
 class VoiceAnalysis(BaseModel):
     entry_date: date
     date_precision: Literal["day", "month"] = "day"
+    parsed_manually: bool = False
     bio: dict[BioField, list[str]] = Field(default_factory=dict)
     finance: list[FinanceEntry] = Field(default_factory=list)
     transfers: list[AccountTransfer] = Field(default_factory=list)

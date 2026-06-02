@@ -16,14 +16,16 @@ from .keyboards import (
     confirmation_keyboard,
     model_selection_keyboard,
     prompt_edit_keyboard,
-    prompts_menu_keyboard,
+    prompts_hub_keyboard,
+    report_prompts_menu_keyboard,
     settings_menu_keyboard,
 )
-from .llm_models import label_for_model_id, model_id_for_choice
+from .llm_models import label_for_model_id, model_id_for_choice, normalize_model_id
 from .models import (
     BIO_FIELD_LABELS,
     FinanceCategorySet,
     FinanceDirection,
+    FinanceEntry,
     PendingEntry,
     VoiceAnalysis,
 )
@@ -33,6 +35,7 @@ from .services.manual_parse import parse_manual_correction
 from .services.prompts import (
     PROMPT_CATALOG,
     edit_hint,
+    is_report_prompt_key,
     load_prompt_by_key,
     preview_prompt,
     prompt_filename,
@@ -43,7 +46,7 @@ from .services.reports import send_user_report, setup_report_scheduler
 from .services.sheets import GoogleSheetsService, SheetsError
 from .services.transcriber import Transcriber, TranscriptionError, create_transcriber
 from .storage import Storage
-from .utils.dates import MONTH_NAMES_NOMINATIVE, today_in_timezone
+from .utils.dates import bio_month_marker, today_in_timezone
 from .utils.text import parse_spreadsheet_id
 
 logger = logging.getLogger(__name__)
@@ -65,9 +68,9 @@ async def start_handler(message: Message, settings: Settings, app_storage: Stora
         "/link_bio ссылка-на-таблицу-биографии\n"
         "/link_money ссылка-на-таблицу-денег\n\n"
         "После голосового сообщения я покажу распределение и дождусь подтверждения.\n"
-        "/report — ежедневный отчёт по таблицам.\n"
+        "/report или кнопка «Ежедневный отчёт» — отчёт по таблицам.\n"
         "/model — модель Haiku / Sonnet 4.5.\n"
-        "/prompts — редактировать промпты отчётов и разбора.",
+        "/prompts — промпты отчётов (отдельно) и разбора голоса.",
         reply_markup=settings_menu_keyboard(),
     )
 
@@ -162,7 +165,33 @@ async def prompts_menu_callback(callback: CallbackQuery) -> None:
     if not callback.message:
         return
     await callback.answer()
-    await _edit_prompts_menu(callback.message)
+    await _edit_prompts_hub(callback.message)
+
+
+@router.callback_query(F.data == "report_prompts_menu")
+async def report_prompts_menu_callback(callback: CallbackQuery) -> None:
+    if not callback.message:
+        return
+    await callback.answer()
+    await callback.message.edit_text(
+        "Промпты отчётов (день / неделя / месяц).\n"
+        "После выбора отправьте новый текст одним сообщением.",
+        reply_markup=report_prompts_menu_keyboard(),
+    )
+
+
+async def _resolve_model_for_chat(
+    chat_id: int,
+    settings: Settings,
+    app_storage: Storage,
+) -> tuple[str, str]:
+    profile = await app_storage.ensure_user(chat_id)
+    raw = profile.llm_model or settings.llm_model
+    model_id = normalize_model_id(raw)
+    if profile.llm_model and profile.llm_model != model_id:
+        await app_storage.set_llm_model(chat_id, model_id)
+    label = label_for_model_id(model_id)
+    return model_id, label
 
 
 @router.callback_query(F.data == "model_menu")
@@ -174,10 +203,13 @@ async def model_menu_callback(
     if not callback.message:
         return
     await callback.answer()
-    profile = await app_storage.ensure_user(callback.message.chat.id)
-    model_id = profile.llm_model or settings.llm_model
+    model_id, label = await _resolve_model_for_chat(
+        callback.message.chat.id,
+        settings,
+        app_storage,
+    )
     await callback.message.edit_text(
-        f"Модель для разбора записей: <b>{html.escape(label_for_model_id(model_id))}</b>",
+        f"Модель для разбора записей: <b>{html.escape(label)}</b>",
         reply_markup=model_selection_keyboard(model_id),
     )
 
@@ -232,7 +264,7 @@ async def prompt_cancel_callback(callback: CallbackQuery, app_storage: Storage) 
         return
     await app_storage.clear_prompt_edit_request(callback.message.chat.id)
     await callback.answer("Отменено.")
-    await _edit_prompts_menu(callback.message)
+    await _edit_prompts_hub(callback.message)
 
 
 @router.message(Command("model"))
@@ -241,10 +273,9 @@ async def model_handler(
     settings: Settings,
     app_storage: Storage,
 ) -> None:
-    profile = await app_storage.ensure_user(message.chat.id)
-    model_id = profile.llm_model or settings.llm_model
+    model_id, label = await _resolve_model_for_chat(message.chat.id, settings, app_storage)
     await message.answer(
-        f"Модель для разбора записей: <b>{html.escape(label_for_model_id(model_id))}</b>",
+        f"Модель для разбора записей: <b>{html.escape(label)}</b>",
         reply_markup=model_selection_keyboard(model_id),
     )
 
@@ -263,10 +294,34 @@ async def set_model_callback(
         return
     model_id = model_id_for_choice(choice)  # type: ignore[arg-type]
     await app_storage.set_llm_model(callback.message.chat.id, model_id)
-    await callback.answer(f"Модель: {label_for_model_id(model_id)}")
+    label = label_for_model_id(model_id)
+    await callback.answer(f"Модель: {label}")
     await callback.message.edit_text(
-        f"Модель для разбора записей: <b>{html.escape(label_for_model_id(model_id))}</b>",
+        f"Модель для разбора записей: <b>{html.escape(label)}</b>",
         reply_markup=model_selection_keyboard(model_id),
+    )
+
+
+@router.callback_query(F.data == "report_daily")
+async def report_daily_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    settings: Settings,
+    app_storage: Storage,
+    sheets_service: GoogleSheetsService,
+    llm_factory: LLMServiceFactory,
+) -> None:
+    if not callback.message:
+        return
+    await callback.answer()
+    await _send_daily_report(
+        chat_id=callback.message.chat.id,
+        reply=callback.message.answer,
+        bot=bot,
+        settings=settings,
+        app_storage=app_storage,
+        sheets_service=sheets_service,
+        llm_factory=llm_factory,
     )
 
 
@@ -279,12 +334,33 @@ async def report_handler(
     sheets_service: GoogleSheetsService,
     llm_factory: LLMServiceFactory,
 ) -> None:
-    profile = await app_storage.ensure_user(message.chat.id)
+    await _send_daily_report(
+        chat_id=message.chat.id,
+        reply=message.answer,
+        bot=bot,
+        settings=settings,
+        app_storage=app_storage,
+        sheets_service=sheets_service,
+        llm_factory=llm_factory,
+    )
+
+
+async def _send_daily_report(
+    *,
+    chat_id: int,
+    reply,
+    bot: Bot,
+    settings: Settings,
+    app_storage: Storage,
+    sheets_service: GoogleSheetsService,
+    llm_factory: LLMServiceFactory,
+) -> None:
+    profile = await app_storage.ensure_user(chat_id)
     if not profile.bio_sheet_id and not profile.money_sheet_id:
-        await message.answer("Сначала подключите таблицы: /link_bio и /link_money.")
+        await reply("Сначала подключите таблицы: /link_bio и /link_money.")
         return
 
-    await message.answer("Готовлю ежедневный отчёт.")
+    await reply("Готовлю ежедневный отчёт.")
     try:
         sent = await send_user_report(
             bot=bot,
@@ -295,11 +371,11 @@ async def report_handler(
             period="daily",
         )
     except Exception as exc:  # noqa: BLE001
-        await message.answer(f"Не удалось сформировать отчёт: {html.escape(str(exc))}")
+        await reply(f"Не удалось сформировать отчёт: {html.escape(str(exc))}")
         return
 
     if not sent:
-        await message.answer("Нет данных для отчёта за сегодня.")
+        await reply("Нет данных для отчёта за сегодня.")
 
 
 @router.message(Command("cancel"))
@@ -367,13 +443,15 @@ async def text_handler(
 
     edit_pending_id = await app_storage.pop_edit_request(message.chat.id)
     if edit_pending_id:
-        await _process_manual_correction(
+        handled = await _process_manual_correction(
             message=message,
             text=message.text,
             app_storage=app_storage,
             settings=settings,
             pending_id=edit_pending_id,
         )
+        if not handled:
+            await app_storage.set_edit_request(message.chat.id, edit_pending_id)
         return
 
     await _process_free_text(
@@ -491,7 +569,7 @@ async def _process_manual_correction(
     app_storage: Storage,
     settings: Settings,
     pending_id: str,
-) -> None:
+) -> bool:
     profile = await app_storage.ensure_user(message.chat.id)
     current_date = today_in_timezone(profile.timezone or settings.timezone)
     analysis = parse_manual_correction(text, current_date)
@@ -500,9 +578,10 @@ async def _process_manual_correction(
             "Не разобрал исправление. Пришлите текст как в подтверждении:\n"
             "Дата: 01.06.2026\n"
             "Земля / Тело: событие\n"
-            "-500 | Категория | описание"
+            "-500 | Категория | описание\n"
+            "Перевод: Банк 1 → Банк 2 | 20000"
         )
-        return
+        return False
 
     pending = PendingEntry(
         id=pending_id,
@@ -518,6 +597,7 @@ async def _process_manual_correction(
             has_finance=analysis.has_finance,
         ),
     )
+    return True
 
 
 async def _process_free_text(
@@ -614,9 +694,10 @@ def _format_confirmation(analysis: VoiceAnalysis) -> str:
         lines.append("<b>Финансы</b>")
         for entry in analysis.finance:
             sign = "+" if entry.direction == FinanceDirection.income else "-"
+            description = _format_finance_description_for_confirmation(entry)
             lines.append(
                 f"{sign}{entry.amount:g} | {html.escape(entry.category)} | "
-                f"{html.escape(entry.description)}"
+                f"{html.escape(description)}"
             )
         for transfer in analysis.transfers:
             lines.append(
@@ -635,9 +716,17 @@ def _select_analysis_part(analysis: VoiceAnalysis, action: str) -> VoiceAnalysis
     return analysis
 
 
+def _format_finance_description_for_confirmation(entry: FinanceEntry) -> str:
+    if entry.day is None:
+        return entry.description
+    if entry.description.casefold().startswith(f"{entry.day} •".casefold()):
+        return entry.description
+    return f"{entry.day} • {entry.description}"
+
+
 def _format_analysis_date(analysis: VoiceAnalysis) -> str:
     if analysis.date_precision == "month":
-        month = MONTH_NAMES_NOMINATIVE[analysis.entry_date.month].lower()
+        month = bio_month_marker(analysis.entry_date.month)
         return f"{month} {analysis.entry_date.year} (без дня)"
     return analysis.entry_date.strftime("%d.%m.%Y")
 
@@ -648,17 +737,19 @@ def _looks_like_email(value: str) -> bool:
 
 async def _answer_prompts_menu(message: Message) -> None:
     await message.answer(
-        "Выберите промпт для редактирования.\n"
-        "После выбора отправьте новый текст одним сообщением.",
-        reply_markup=prompts_menu_keyboard(),
+        "Промпты разделены:\n"
+        "• отчёты — шаблоны дня, недели, месяца и системный;\n"
+        "• разбор голоса — отдельный промпт для био и денег.",
+        reply_markup=prompts_hub_keyboard(),
     )
 
 
-async def _edit_prompts_menu(message: Message) -> None:
+async def _edit_prompts_hub(message: Message) -> None:
     await message.edit_text(
-        "Выберите промпт для редактирования.\n"
-        "После выбора отправьте новый текст одним сообщением.",
-        reply_markup=prompts_menu_keyboard(),
+        "Промпты разделены:\n"
+        "• отчёты — шаблоны дня, недели, месяца и системный;\n"
+        "• разбор голоса — отдельный промпт для био и денег.",
+        reply_markup=prompts_hub_keyboard(),
     )
 
 
@@ -676,7 +767,12 @@ async def _save_prompt_text(message: Message, prompt_key: str, text: str) -> Non
     note = f"Промпт «{prompt_label(prompt_key)}» сохранён."
     if warnings:
         note += "\nПредупреждение: " + ", ".join(warnings) + "."
-    await message.answer(note, reply_markup=prompts_menu_keyboard())
+    menu = (
+        report_prompts_menu_keyboard()
+        if is_report_prompt_key(prompt_key)
+        else prompts_hub_keyboard()
+    )
+    await message.answer(note, reply_markup=menu)
 
 
 async def _main(settings: Settings) -> None:

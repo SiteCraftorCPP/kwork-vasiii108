@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+from .llm_models import normalize_model_id
 from .models import PendingEntry, UserProfile
 
 T = TypeVar("T")
@@ -111,7 +112,7 @@ class Storage:
                 SET llm_model = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE chat_id = ?
                 """,
-                (model_id, chat_id),
+                (normalize_model_id(model_id), chat_id),
             )
             row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         return self._row_to_user(row)
@@ -251,7 +252,8 @@ class Storage:
 
     @staticmethod
     def _row_to_user(row: sqlite3.Row) -> UserProfile:
-        llm_model = row["llm_model"] if "llm_model" in row.keys() else None
+        raw_llm = row["llm_model"] if "llm_model" in row.keys() else None
+        llm_model = normalize_model_id(raw_llm) if raw_llm else None
         return UserProfile(
             chat_id=row["chat_id"],
             bio_sheet_id=row["bio_sheet_id"],

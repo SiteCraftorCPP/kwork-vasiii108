@@ -48,5 +48,22 @@ def normalize_month_text(value: str) -> str:
     return value.strip().lower().replace("ё", "е")
 
 
+def bio_month_marker(month: int) -> str:
+    """Month label written into bio cells (always lowercase)."""
+    return MONTH_NAMES_NOMINATIVE[month].lower()
+
+
+def normalize_bio_marker(marker: str) -> str:
+    """Day digits unchanged; known month names → lowercase nominative."""
+    value = marker.strip()
+    if not value or value.isdigit():
+        return value
+    normalized = normalize_month_text(value)
+    for month_num, aliases in MONTH_ALIASES.items():
+        if normalized in aliases:
+            return bio_month_marker(month_num)
+    return value
+
+
 def month_matches(value: str, month: int) -> bool:
     return normalize_month_text(value) in MONTH_ALIASES[month]

@@ -4,6 +4,7 @@ from typing import Literal
 
 from ..models import (
     BIO_FIELD_LABELS,
+    AccountTransfer,
     BioField,
     FinanceDirection,
     FinanceEntry,
@@ -16,20 +17,33 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _FINANCE_LINE_RE = re.compile(
     r"^([+-])\s*([\d\s.,]+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*$",
 )
+_TRANSFER_LINE_RE = re.compile(
+    r"^перевод:\s*(.+?)\s*(?:→|->)\s*(.+?)\s*\|\s*([\d\s.,]+)\s*$",
+    re.IGNORECASE,
+)
 _DATE_LINE_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
 _DAY_PREFIX_RE = re.compile(r"^(\d{1,2})\s*•\s*(.+)$")
+_SKIP_LINE_PREFIXES = (
+    "проверьте распределение",
+    "биография",
+    "финансы",
+    "всё верно",
+    "все верно",
+)
 
 
 def parse_manual_correction(text: str, current_date: date) -> VoiceAnalysis | None:
+    """Parse user correction text as-is (no LLM, no bio/finance heuristics)."""
     plain = _HTML_TAG_RE.sub("", text)
     plain = plain.replace("&nbsp;", " ")
     lines = [compact_spaces(line) for line in plain.splitlines()]
-    lines = [line for line in lines if line]
+    lines = [line for line in lines if line and not _should_skip_line(line)]
 
     entry_date = current_date
     date_precision: Literal["day", "month"] = "day"
     bio: dict[BioField, list[str]] = {}
     finance: list[FinanceEntry] = []
+    transfers: list[AccountTransfer] = []
 
     label_to_field = {label.casefold(): field for field, label in BIO_FIELD_LABELS.items()}
 
@@ -50,6 +64,20 @@ def parse_manual_correction(text: str, current_date: date) -> VoiceAnalysis | No
                     entry_date = date(year, month, day)
             continue
 
+        transfer_match = _TRANSFER_LINE_RE.match(line)
+        if transfer_match:
+            from_account, to_account, amount_raw = transfer_match.groups()
+            amount = _parse_amount(amount_raw)
+            if amount is not None:
+                transfers.append(
+                    AccountTransfer.model_construct(
+                        from_account=from_account.strip(),
+                        to_account=to_account.strip(),
+                        amount=amount,
+                    )
+                )
+            continue
+
         finance_match = _FINANCE_LINE_RE.match(line)
         if finance_match:
             sign, amount_raw, category, description = finance_match.groups()
@@ -59,14 +87,14 @@ def parse_manual_correction(text: str, current_date: date) -> VoiceAnalysis | No
             direction = (
                 FinanceDirection.income if sign == "+" else FinanceDirection.expense
             )
+            description = description.strip()
             day = _extract_day_from_description(description)
-            clean_description = _strip_day_prefix(description)
             finance.append(
-                FinanceEntry(
+                FinanceEntry.model_construct(
                     direction=direction,
                     amount=amount,
                     category=category.strip(),
-                    description=clean_description,
+                    description=_description_for_manual(description, day),
                     day=day,
                 )
             )
@@ -84,16 +112,32 @@ def parse_manual_correction(text: str, current_date: date) -> VoiceAnalysis | No
                 if items:
                     bio[field] = items
 
-    if not bio and not finance:
+    if not bio and not finance and not transfers:
         return None
 
     return VoiceAnalysis(
         entry_date=entry_date,
         date_precision=date_precision,
+        parsed_manually=True,
         bio=bio,
         finance=finance,
+        transfers=transfers,
         raw_text=text,
     )
+
+
+def _should_skip_line(line: str) -> bool:
+    lower = line.casefold()
+    return any(lower.startswith(prefix) for prefix in _SKIP_LINE_PREFIXES)
+
+
+def _description_for_manual(description: str, day: int | None) -> str:
+    if day is None:
+        return strip_final_dot(description)
+    match = _DAY_PREFIX_RE.match(description.strip())
+    if match:
+        return strip_final_dot(match.group(2).strip())
+    return strip_final_dot(description)
 
 
 def _parse_amount(raw: str) -> float | None:
@@ -116,10 +160,3 @@ def _extract_day_from_description(description: str) -> int | None:
     if 1 <= day <= 31:
         return day
     return None
-
-
-def _strip_day_prefix(description: str) -> str:
-    match = _DAY_PREFIX_RE.match(description.strip())
-    if match:
-        return strip_final_dot(match.group(2).strip())
-    return strip_final_dot(description.strip())

@@ -187,6 +187,64 @@ def test_prepare_voice_payload_resets_first_day_for_current_month_without_day() 
     VoiceAnalysis.model_validate(result)
 
 
+def test_prepare_voice_payload_moves_birth_fact_from_finance_to_bio() -> None:
+    payload = {
+        "entry_date": "2026-05-27",
+        "bio": {},
+        "finance": [
+            {
+                "direction": "expense",
+                "amount": 500,
+                "category": "Другое",
+                "description": "родилась в городе",
+            }
+        ],
+        "raw_text": "родилась в городе Минске",
+    }
+
+    result = _prepare_voice_payload(payload)
+
+    assert result["finance"] == []
+    assert result["bio"]["water_body"] == ["родилась в городе Минске"]
+
+
+def test_prepare_voice_payload_keeps_finance_when_amount_and_birth_together() -> None:
+    payload = {
+        "entry_date": "2026-05-27",
+        "bio": {},
+        "finance": [
+            {
+                "direction": "expense",
+                "amount": 500,
+                "category": "Еда",
+                "description": "обед",
+            }
+        ],
+        "raw_text": "родилась в Минске и потратил 500 рублей на обед",
+    }
+
+    result = _prepare_voice_payload(payload)
+
+    assert len(result["finance"]) == 1
+    assert result["finance"][0]["description"] == "обед"
+    assert "родилась" in result["bio"]["water_body"][0].casefold()
+
+
+def test_prepare_voice_payload_relocates_birth_from_wrong_bio_field() -> None:
+    payload = {
+        "entry_date": "1980-05-01",
+        "date_precision": "month",
+        "bio": {"earth_work": ["родилась в Минске"]},
+        "finance": [],
+        "raw_text": "1980 год, май, родилась в городе Минске",
+    }
+
+    result = _prepare_voice_payload(payload, current_date=date(2026, 5, 27))
+
+    assert any("родилась в Минске" in item for item in result["bio"]["water_body"])
+    assert "earth_work" not in result["bio"] or not result["bio"]["earth_work"]
+
+
 def test_prepare_voice_payload_keeps_day_precision_when_day_is_named() -> None:
     payload = {
         "entry_date": "1980-05-15",

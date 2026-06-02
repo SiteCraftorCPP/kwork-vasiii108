@@ -1,3 +1,6 @@
+from gspread.utils import rowcol_to_a1
+
+from vasilii_bot.models import ACCOUNT_TRANSFER_AMOUNT_COL
 from vasilii_bot.services.sheets import GoogleSheetsService
 from vasilii_bot.utils.text import append_signed_amount_formula, normalize_account_name
 
@@ -10,11 +13,14 @@ def test_normalize_account_name() -> None:
 def test_append_signed_amount_formula_outgoing() -> None:
     assert append_signed_amount_formula("", -20000) == "=-20000"
     assert append_signed_amount_formula("=1000", -20000) == "=1000-20000"
+    assert append_signed_amount_formula("p.0,00", -20000) == "=-20000"
+    assert append_signed_amount_formula("р.0,00", -20000) == "=-20000"
 
 
 def test_append_signed_amount_formula_incoming() -> None:
     assert append_signed_amount_formula("", 20000) == "=20000"
     assert append_signed_amount_formula("=1000", 20000) == "=1000+20000"
+    assert append_signed_amount_formula("p.0,00", 20000) == "=20000"
 
 
 def test_find_account_row_matches_bank_labels() -> None:
@@ -23,3 +29,30 @@ def test_find_account_row_matches_bank_labels() -> None:
     values[21] = ["", "Банк 2", "0,00 ₽", "p.0,00", ""]
     row = GoogleSheetsService._find_account_row(values, "банк 2")
     assert row == 22
+
+
+def test_transfer_bank1_to_bank2_targets_column_d_rows_21_22() -> None:
+    values = [[""] * 5 for _ in range(30)]
+    values[20] = ["", "Банк 1", "0,00 ₽", "р.0,00", ""]
+    values[21] = ["", "Банк 2", "0,00 ₽", "р.0,00", ""]
+
+    from_row = GoogleSheetsService._find_account_row(values, "Банк 1")
+    to_row = GoogleSheetsService._find_account_row(values, "Банк 2")
+    assert from_row == 21
+    assert to_row == 22
+    assert rowcol_to_a1(from_row, ACCOUNT_TRANSFER_AMOUNT_COL) == "D21"
+    assert rowcol_to_a1(to_row, ACCOUNT_TRANSFER_AMOUNT_COL) == "D22"
+
+    amount = 20000.0
+    updates = {
+        rowcol_to_a1(from_row, ACCOUNT_TRANSFER_AMOUNT_COL): append_signed_amount_formula(
+            "р.0,00",
+            -amount,
+        ),
+        rowcol_to_a1(to_row, ACCOUNT_TRANSFER_AMOUNT_COL): append_signed_amount_formula(
+            "р.0,00",
+            amount,
+        ),
+    }
+    assert updates["D21"] == "=-20000"
+    assert updates["D22"] == "=20000"

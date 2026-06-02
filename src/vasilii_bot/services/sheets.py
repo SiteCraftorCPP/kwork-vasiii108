@@ -25,17 +25,26 @@ from ..models import (
     UserProfile,
     VoiceAnalysis,
 )
-from ..utils.dates import MONTH_NAMES_NOMINATIVE, month_matches, month_sheet_name, year_sheet_name
+from ..utils.dates import (
+    bio_month_marker,
+    month_matches,
+    month_sheet_name,
+    normalize_bio_marker,
+    year_sheet_name,
+)
 from ..utils.text import (
     MONTH_SHEET_TITLE_RE,
+    TEMPLATE_SHEET_TITLE_RE,
     YEAR_SHEET_TITLE_RE,
     append_amount_formula,
     append_signed_amount_formula,
-    build_day_marker_runs,
+    extend_day_format_runs,
     compact_spaces,
     day_segment_match,
     format_bio_description,
     format_money_description,
+    normalize_bio_description_text,
+    normalize_money_description_text,
     has_day_segment,
     merge_day_segments,
     normalize_account_name,
@@ -394,9 +403,27 @@ class GoogleSheetsService:
         template_id: str | None,
         kind: Literal["month", "year"],
     ) -> Worksheet:
-        source_sheet_id = self._resolve_template_sheet_id(template_id, kind)
-        if source_sheet_id is None:
-            source_sheet_id = self._resolve_local_template_sheet_id(spreadsheet, kind)
+        if template_id:
+            source_sheet_id = self._resolve_template_sheet_id(template_id, kind)
+            if source_sheet_id is None:
+                label = "месяца" if kind == "month" else "года"
+                raise SheetsError(
+                    f"В шаблоне таблицы ({template_id}) не найден лист для {label}. "
+                    "Нужен лист «Шаблон»/«template» или самый ранний лист "
+                    "формата MM.YYYY (деньги) / YYYY (био)."
+                )
+            return self._copy_sheet_from_template_spreadsheet(
+                template_spreadsheet_id=template_id,
+                destination=spreadsheet,
+                source_sheet_id=source_sheet_id,
+                new_title=new_title,
+            )
+
+        logger.warning(
+            "Template id for %s sheet is not configured; copying from local template sheet",
+            kind,
+        )
+        source_sheet_id = self._resolve_local_template_sheet_id(spreadsheet, kind)
         body = {
             "requests": [
                 {
@@ -413,13 +440,44 @@ class GoogleSheetsService:
         ).execute()
         return spreadsheet.worksheet(new_title)
 
+    def _copy_sheet_from_template_spreadsheet(
+        self,
+        template_spreadsheet_id: str,
+        destination: Spreadsheet,
+        source_sheet_id: int,
+        new_title: str,
+    ) -> Worksheet:
+        copied = (
+            self.api.spreadsheets()
+            .sheets()
+            .copyTo(
+                spreadsheetId=template_spreadsheet_id,
+                sheetId=source_sheet_id,
+                body={"destinationSpreadsheetId": destination.id},
+            )
+            .execute()
+        )
+        new_sheet_id = copied["sheetId"]
+        self.api.spreadsheets().batchUpdate(
+            spreadsheetId=destination.id,
+            body={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": new_sheet_id, "title": new_title},
+                            "fields": "title",
+                        }
+                    }
+                ]
+            },
+        ).execute()
+        return destination.worksheet(new_title)
+
     def _resolve_template_sheet_id(
         self,
-        template_id: str | None,
+        template_id: str,
         kind: Literal["month", "year"],
     ) -> int | None:
-        if not template_id:
-            return None
         try:
             template = self.client.open_by_key(template_id)
         except Exception as exc:  # noqa: BLE001
@@ -436,7 +494,12 @@ class GoogleSheetsService:
         worksheet = _pick_template_worksheet(spreadsheet.worksheets(), kind)
         if worksheet:
             return worksheet.id
-        return spreadsheet.worksheets()[0].id
+        label = "MM.YYYY" if kind == "month" else "YYYY"
+        raise SheetsError(
+            f"В таблице {spreadsheet.title} не найден чистый лист-шаблон "
+            f"(«Шаблон» или самый ранний {label}). "
+            "Задайте BIO_TEMPLATE_ID и MONEY_TEMPLATE_ID в .env."
+        )
 
     @staticmethod
     def _find_bio_month_row(worksheet: Worksheet, month: int) -> int:
@@ -463,21 +526,24 @@ class GoogleSheetsService:
         existing_text = _cell_string_value(cell_data)
         existing_runs = list(cell_data.get("textFormatRuns") or [])
 
+        existing_raw = existing_text
+
         if marker and not marker.isdigit():
-            new_text, runs = _append_rich_day_text(existing_text, existing_runs, marker, items or [])
+            new_text, runs = _append_rich_day_text(existing_raw, existing_runs, marker, items or [])
+        elif marker and marker.isdigit() and items:
+            normalized = normalize_bio_description_text(existing_raw)
+            segments = parse_day_segments(normalized, money_layout=False)
+            segments = merge_day_segments(segments, int(marker), items)
+            new_text = format_bio_description(segments)
+            runs = extend_day_format_runs(existing_raw, existing_runs, new_text) if new_text else []
         else:
-            segments = parse_day_segments(existing_text, money_layout=money_layout)
+            normalized = normalize_money_description_text(existing_raw)
+            segments = parse_day_segments(normalized, money_layout=True)
             if day_items:
                 for day, description in day_items:
                     segments = merge_day_segments(segments, day, [description])
-            elif marker and marker.isdigit() and items:
-                segments = merge_day_segments(segments, int(marker), items)
-            new_text = (
-                format_money_description(segments)
-                if money_layout
-                else format_bio_description(segments)
-            )
-            runs = build_day_marker_runs(new_text) if new_text else []
+            new_text = format_money_description(segments)
+            runs = extend_day_format_runs(existing_raw, existing_runs, new_text) if new_text else []
 
         self._write_description_cell(
             spreadsheet_id=spreadsheet_id,
@@ -720,7 +786,7 @@ def _append_rich_day_text(
     items: list[str],
     separator: str = "\n",
 ) -> tuple[str, list[dict[str, Any]]]:
-    clean_marker = compact_spaces(marker)
+    clean_marker = normalize_bio_marker(compact_spaces(marker))
     clean_items = _dedupe_items([
         strip_final_dot(compact_spaces(item))
         for item in items
@@ -759,7 +825,7 @@ def _append_rich_day_text(
 
 def _bio_entry_marker(analysis: VoiceAnalysis) -> str:
     if analysis.date_precision == "month":
-        return MONTH_NAMES_NOMINATIVE[analysis.entry_date.month].lower()
+        return bio_month_marker(analysis.entry_date.month)
     return str(analysis.entry_date.day)
 
 
@@ -822,6 +888,14 @@ def _pick_template_worksheet(
     worksheets: list[Worksheet],
     kind: Literal["month", "year"],
 ) -> Worksheet | None:
+    named = [
+        ws
+        for ws in worksheets
+        if TEMPLATE_SHEET_TITLE_RE.fullmatch(compact_spaces(ws.title))
+    ]
+    if named:
+        return named[0]
+
     if kind == "year":
         matches = [ws for ws in worksheets if YEAR_SHEET_TITLE_RE.fullmatch(ws.title)]
     else:
